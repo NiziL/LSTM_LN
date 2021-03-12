@@ -53,11 +53,12 @@ class LSTM(nn.Module):
                 hiddens.append((h, c))
         return hiddens
 
-    def layer_forward(self, l, xs, h, image_emb, reverse=False):
+    def layer_forward(self, l, xs, h, length, image_emb, reverse=False):
         '''
+        xs MUST BE sorted, longest sequence first whithin batch
         return:
-            xs: (seq_len, batch, hidden)
-            h: (1, batch, hidden)
+            y: (seq_len, batch, hidden) hidden state during sequence
+            h: (1, batch, hidden) final hidden state and context for each layer
         '''
         if self.batch_first:
             xs = xs.permute(1, 0, 2).contiguous()
@@ -65,18 +66,28 @@ class LSTM(nn.Module):
         for i in range(xs.size(0)):
             if reverse:
                 x = xs.narrow(0, (xs.size(0)-1)-i, 1)
+                k = (length > (xs.size(0)-1)-i).sum().item()
             else:
                 x = xs.narrow(0, i, 1)
-            y, h = l(x, h, image_emb)
+                k = (length < i).sum().item()
+            y, (h_new, c_new) = l(x, h, image_emb)
+            h_old, c_old = h
+            h_new[:, k:, :] = h_old[:, k:, :]
+            c_new[:, k:, :] = c_old[:, k:, :]
+            h = (h_new, c_new)
             ys.append(y)
         y = torch.cat(ys, 0)
         if self.batch_first:
             y = y.permute(1, 0, 2)
         return y, h
 
-    def forward(self, x, hiddens, image_emb=None):
+    def forward(self, x, hiddens=None, length=None, image_emb=None):
         if self.direction > 1:
             x = torch.cat((x, x), 2)
+
+        if hiddens is None:
+            hiddens = self.init_hidden(x.size(0) if self.batch_first else x.size(1))
+
         if type(hiddens) != list:
             # when the hidden feed is (direction * num_layer, batch, hidden)
             tmp = []
@@ -89,10 +100,10 @@ class LSTM(nn.Module):
         new_cs = []
         for l_idx in range(0, len(self.layers), self.direction):
             l, h = self.layers[l_idx], hiddens[l_idx]
-            f_x, f_h = self.layer_forward(l, x, h, image_emb)
+            f_x, f_h = self.layer_forward(l, x, h, length, image_emb)
             if self.direction > 1:
                 l, h  = self.layers[l_idx+1], hiddens[l_idx+1]
-                r_x, r_h = self.layer_forward(l, x, h, image_emb, reverse=True)
+                r_x, r_h = self.layer_forward(l, x, h, length, image_emb, reverse=True)
 
                 x = torch.cat((f_x, r_x), 2)
                 h = torch.cat((f_h[0], r_h[0]), 0)
@@ -105,6 +116,8 @@ class LSTM(nn.Module):
 
         h = torch.cat(new_hs, 0)
         c = torch.cat(new_cs, 0)
+        #if self.batch_first:
+        #    x = x.permute(1, 0, 2)
         return x, (h, c)
 
 class CLN(nn.Module):
@@ -359,9 +372,10 @@ class LayerNormLSTM(LSTMcell):
         return h_t, (h_t, c_t)
 
 if __name__ == '__main__':
-    model = LSTM(50, 100, 2)
-    x = Variable(Tensor(50, 32, 50))
-    #h = model.init_hidden(32)
-    h = (Variable(Tensor(2*2, 32, 100)),
-         Variable(Tensor(2*2, 32, 100)))
-    print(model(x, h))
+    model = LSTM(128, 100, 2, batch_first=True).cuda()
+    x = Variable(Tensor(4, 10, 128).cuda())
+    h = model.init_hidden(4)
+    #h = (torch.zeros(2*2, 4, 100).cuda(), torch.zeros(2*2, 4, 100).cuda())
+    y, h = model(x, h, length=torch.tensor([10, 8, 7, 3]))
+    print(y.size())
+    #print(model(x, h))
